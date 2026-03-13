@@ -138,6 +138,19 @@ const BOT_NAMES=['ROBO','GLITCH','AXIOM','NEXUS','DELTA','OMEGA'];
 
 // Sounds (short free-use-style clips – you can replace URLs with your own)
 const sounds = {};
+  // Unlock audio on first user interaction (very common fix)
+function unlockAudio() {
+  Object.values(sounds).forEach(s => {
+    if (s.paused) {
+      s.play().catch(() => {});
+      s.pause();  // immediately stop — we just want to resume context
+    }
+  });
+  document.removeEventListener('click', unlockAudio);
+  document.removeEventListener('touchstart', unlockAudio);
+}
+document.addEventListener('click', unlockAudio);
+document.addEventListener('touchstart', unlockAudio);
 function loadSound(name, url, vol=0.7) {
   const a = new Audio(url);
   a.preload = "auto";
