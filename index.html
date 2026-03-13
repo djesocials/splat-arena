@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-  <link rel="icon" type="image/x-icon" href="favicon.png">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
@@ -235,6 +234,7 @@ let bots=[];
 let dpr=1;
 let noisePattern=null;
 let remoteInputs={};
+let playersCache=null;
 
 const clientId = Math.random().toString(36).slice(2,10);
 let roomCode='';
@@ -357,6 +357,43 @@ function initFX(){
   noisePattern=ctx.createPattern(n,'repeat');
 }
 
+function normalizeArray(src){
+  if(Array.isArray(src)) return src.filter(v=>v!=null);
+  if(!src || typeof src!=='object') return [];
+  return Object.values(src).filter(v=>v!=null);
+}
+
+function normalizePlayers(players){
+  const arr=[null,null,null,null];
+  if(Array.isArray(players)){
+    for(let i=0;i<4;i++){ if(players[i]) arr[i]=players[i]; }
+  } else if(players && typeof players==='object'){
+    for(const [k,v] of Object.entries(players)){
+      const id=Number(k);
+      if(Number.isNaN(id)||id<0||id>3||!v)continue;
+      arr[id]=v;
+    }
+  }
+  for(let i=0;i<4;i++){
+    if(!arr[i]) continue;
+    const nm=(arr[i].name||'PLAYER').toUpperCase().slice(0,12);
+    const base=mkPlayer(i,nm);
+    arr[i]=Object.assign(base, arr[i], {id:i, name:nm});
+  }
+  return arr;
+}
+
+function normalizeState(raw){
+  if(!raw || typeof raw!=='object') return mkState();
+  const out=raw;
+  out.players=normalizePlayers(out.players);
+  out.bullets=normalizeArray(out.bullets);
+  out.powerups=normalizeArray(out.powerups);
+  if(!out.phase) out.phase='lobby';
+  if(typeof out.timeLeft!=='number') out.timeLeft=GDUR;
+  return out;
+}
+
 /* ------------------------------
    BOT MODE UI
 ------------------------------ */
@@ -374,6 +411,7 @@ function setDiff(d){
 }
 function startBotGame(){
   isHost=true; botMode=true; myId=0; roomCode='';
+  remoteInputs={};
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='playing'; gs.timeLeft=GDUR; gs.code='------';
   bots=[];
   for(let i=0;i<botCount;i++){
@@ -407,8 +445,8 @@ function bindRoomListeners(){
     const data=snap.val();
     if(!data || !data.gs)return;
     const was=gs&&gs.phase==='playing';
-    gs=data.gs;
-    if(data.splats) splats=data.splats;
+    gs=normalizeState(data.gs);
+    if(data.splats) splats=Array.isArray(data.splats)?data.splats:Object.values(data.splats);
     if(gs.phase==='lobby'){updateLobby();showScreen('screen-lobby');}
     else if(gs.phase==='playing'&&!was){launchGame();}
     else if(gs.phase==='gameover'){showGO();}
@@ -438,10 +476,21 @@ function cleanupRoom(){
   roomCode='';
   roomRef=playersRef=stateRef=inputsRef=metaRef=restartRef=null;
   remoteInputs={};
+  playersCache=null;
 }
 
 function syncPlayersFromDb(playersData){
   if(!gs) gs=mkState();
+  playersCache=playersData||{};
+  if(!isHost && playersData){
+    for(const [k,v] of Object.entries(playersData)){
+      if(v && v.clientId===clientId){
+        const id=Number(k);
+        if(!Number.isNaN(id)) myId=id;
+        break;
+      }
+    }
+  }
   if(gs.phase==='lobby'){
     gs.players=[null,null,null,null];
     for(const [k,v] of Object.entries(playersData)){
@@ -452,6 +501,8 @@ function syncPlayersFromDb(playersData){
     gs.code=roomCode||gs.code;
     updateLobby();
   } else {
+    const hasKeys = playersData && Object.keys(playersData).length>0;
+    if(!hasKeys) return;
     for(let i=0;i<4;i++){
       if(gs.players[i] && !playersData[i]) gs.players[i]=null;
     }
@@ -490,6 +541,7 @@ async function hostGame(){
 
   isHost=true; botMode=false; myId=0;
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='lobby'; gs.code=roomCode;
+  remoteInputs={};
 
   try{
     await set(roomRef,{
@@ -547,6 +599,7 @@ async function joinGame(){
   if(pidFound===null || Number.isNaN(pidFound)){ msg.textContent='Join failed'; cleanupRoom(); return; }
 
   myId=pidFound; isHost=false; botMode=false;
+  remoteInputs={};
   onDisconnect(ref(db,`rooms/${roomCode}/players/${myId}`)).remove();
   onDisconnect(ref(db,`rooms/${roomCode}/inputs/${myId}`)).remove();
   bindRoomListeners();
@@ -586,10 +639,19 @@ function mkPlayer(id,name){
 ------------------------------ */
 function startGame(){
   if(!isHost)return;
-  const old=gs.players.map(p=>p?mkPlayer(p.id,p.name):null);
+  let old=gs.players.map(p=>p?mkPlayer(p.id,p.name):null);
+  if(playersCache && Object.keys(playersCache).length){
+    old=[null,null,null,null];
+    for(const [k,v] of Object.entries(playersCache)){
+      const id=Number(k);
+      if(Number.isNaN(id)||id<0||id>3||!v)continue;
+      old[id]=mkPlayer(id,(v.name||'PLAYER').toUpperCase().slice(0,12));
+    }
+  }
   gs=mkState(); gs.players=old; gs.phase='playing'; gs.timeLeft=GDUR;
   gs.code=roomCode||document.getElementById('codeDisplay').textContent;
   splats=[]; parts=[]; trails={}; bId=0; pId=0; puTimer=0; netTimer=0;
+  remoteInputs={};
   if(metaRef) update(metaRef,{status:'playing',startedAt:serverTimestamp()});
   if(inputsRef) remove(inputsRef);
   bcast(); launchGame();
@@ -656,7 +718,15 @@ function tick(dt){
   if(!botMode){
     for(let i=1;i<4;i++){
       const ri=remoteInputs[i];
-      if(ri) applyInp(i,ri);
+      if(ri && ri.t && (Date.now()-ri.t)<220){
+        applyInp(i,ri);
+      } else {
+        const p=gs.players[i];
+        if(p && p.alive){
+          p.vx=lerp(p.vx,0,.08);
+          p.vy=lerp(p.vy,0,.08);
+        }
+      }
     }
   }
   if(botMode) tickBots(dt);
@@ -746,6 +816,7 @@ function applyBotInp(pid,moveAngle,aimAngle,shoot,speedMult){
 
 function applyInp(pid,i){
   const p=gs.players[pid]; if(!p||!p.alive)return;
+  if(!i || !Number.isFinite(i.angle)) return;
   const ch=p.chaos>0?-1:1;
   const spd=PSPD*(1+(p.speed>0?.65:0))*ch;
   p.vx=lerp(p.vx,Math.cos(i.angle)*spd,.15);
@@ -1287,6 +1358,7 @@ window.setBotCount = setBotCount;
 window.setDiff = setDiff;
 window.startBotGame = startBotGame;
 window.copyCode = copyCode;
+window.showScreen = showScreen;
 </script>
 </body>
 </html>
