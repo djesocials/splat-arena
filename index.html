@@ -235,6 +235,8 @@ let dpr=1;
 let noisePattern=null;
 let remoteInputs={};
 let playersCache=null;
+let snapshots=[];
+let viewPlayers=null;
 
 const clientId = Math.random().toString(36).slice(2,10);
 let roomCode='';
@@ -394,6 +396,73 @@ function normalizeState(raw){
   return out;
 }
 
+function lerpAngle(a,b,t){
+  let d=((b-a+Math.PI*3)%(Math.PI*2))-Math.PI;
+  return a+d*t;
+}
+
+function clonePlayers(players){
+  return players.map(p=>p?{...p}:null);
+}
+
+function storeSnapshot(gsSnap, ts){
+  snapshots.push({t:ts, players:clonePlayers(gsSnap.players)});
+  if(snapshots.length>6) snapshots.shift();
+}
+
+function samplePlayers(targetT){
+  if(snapshots.length===0) return null;
+  let a=null, b=null;
+  for(let i=0;i<snapshots.length;i++){
+    const s=snapshots[i];
+    if(s.t<=targetT) a=s;
+    if(s.t>targetT){ b=s; break; }
+  }
+  if(!a) return clonePlayers(snapshots[0].players);
+  if(!b){
+    const dt=Math.min(0.16, (targetT-a.t)/1000);
+    return a.players.map(p=>{
+      if(!p) return null;
+      if(!p.alive) return {...p};
+      const np={...p};
+      np.x=p.x+(p.vx||0)*dt;
+      np.y=p.y+(p.vy||0)*dt;
+      return np;
+    });
+  }
+  const span=b.t-a.t;
+  const t=span>0?(targetT-a.t)/span:0;
+  return a.players.map((p,i)=>{
+    const q=b.players[i];
+    if(!p && !q) return null;
+    const base=q||p;
+    if(!p || !q) return base?{...base}:null;
+    const np={...q};
+    np.x=lerp(p.x,q.x,t);
+    np.y=lerp(p.y,q.y,t);
+    np.angle=lerpAngle(p.angle,q.angle,t);
+    np.vx=lerp(p.vx||0,q.vx||0,t);
+    np.vy=lerp(p.vy||0,q.vy||0,t);
+    return np;
+  });
+}
+
+function updateView(){
+  if(isHost){ viewPlayers=null; return; }
+  const targetT=Date.now()-70;
+  viewPlayers=samplePlayers(targetT);
+}
+
+function getRenderPlayers(){
+  if(!gs) return [];
+  return (!isHost && viewPlayers)?viewPlayers:gs.players;
+}
+
+function getRenderPlayer(id){
+  const arr=getRenderPlayers();
+  return arr[id];
+}
+
 /* ------------------------------
    BOT MODE UI
 ------------------------------ */
@@ -412,6 +481,7 @@ function setDiff(d){
 function startBotGame(){
   isHost=true; botMode=true; myId=0; roomCode='';
   remoteInputs={};
+  snapshots=[]; viewPlayers=null;
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='playing'; gs.timeLeft=GDUR; gs.code='------';
   bots=[];
   for(let i=0;i<botCount;i++){
@@ -446,6 +516,7 @@ function bindRoomListeners(){
     if(!data || !data.gs)return;
     const was=gs&&gs.phase==='playing';
     gs=normalizeState(data.gs);
+    storeSnapshot(gs, data.ts||Date.now());
     if(data.splats) splats=Array.isArray(data.splats)?data.splats:Object.values(data.splats);
     if(gs.phase==='lobby'){updateLobby();showScreen('screen-lobby');}
     else if(gs.phase==='playing'&&!was){launchGame();}
@@ -477,6 +548,8 @@ function cleanupRoom(){
   roomRef=playersRef=stateRef=inputsRef=metaRef=restartRef=null;
   remoteInputs={};
   playersCache=null;
+  snapshots=[];
+  viewPlayers=null;
 }
 
 function syncPlayersFromDb(playersData){
@@ -542,6 +615,7 @@ async function hostGame(){
   isHost=true; botMode=false; myId=0;
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='lobby'; gs.code=roomCode;
   remoteInputs={};
+  snapshots=[]; viewPlayers=null;
 
   try{
     await set(roomRef,{
@@ -600,6 +674,7 @@ async function joinGame(){
 
   myId=pidFound; isHost=false; botMode=false;
   remoteInputs={};
+  snapshots=[]; viewPlayers=null;
   onDisconnect(ref(db,`rooms/${roomCode}/players/${myId}`)).remove();
   onDisconnect(ref(db,`rooms/${roomCode}/inputs/${myId}`)).remove();
   bindRoomListeners();
@@ -652,6 +727,7 @@ function startGame(){
   gs.code=roomCode||document.getElementById('codeDisplay').textContent;
   splats=[]; parts=[]; trails={}; bId=0; pId=0; puTimer=0; netTimer=0;
   remoteInputs={};
+  snapshots=[]; viewPlayers=null;
   if(metaRef) update(metaRef,{status:'playing',startedAt:serverTimestamp()});
   if(inputsRef) remove(inputsRef);
   bcast(); launchGame();
@@ -686,7 +762,7 @@ function launchGame(){
 
       if(!isHost && roomCode){
         inputNetTimer+=dt;
-        if(inputNetTimer>=0.05){
+        if(inputNetTimer>=0.033){
           set(ref(db,`rooms/${roomCode}/inputs/${myId}`),{angle:inp.angle,shoot:inp.shoot,t:Date.now()});
           inputNetTimer=0;
         }
@@ -703,6 +779,7 @@ function launchGame(){
       tick(dt);
     }
 
+    updateView();
     updateCamera(dt); updateParts(dt); updateTrails();
     render(); updateHUD(); renderMinimap();
   })(performance.now());
@@ -738,7 +815,7 @@ function tick(dt){
 
   if(!botMode){
     netTimer += dt;
-    if(netTimer >= 0.08) {
+    if(netTimer >= 0.05) {
        bcast();
        netTimer = 0;
     }
@@ -978,7 +1055,7 @@ function leaveGame(){
    CLIENT VISUALS
 ------------------------------ */
 function updateCamera(dt){
-  const me=gs&&gs.players[myId]; if(!me)return;
+  const me=getRenderPlayer(myId); if(!me)return;
   const leadX=Math.cos(inp.angle)*80;
   const leadY=Math.sin(inp.angle)*80;
   const targetX=me.x+leadX-canvas.clientWidth/2;
@@ -994,7 +1071,7 @@ function updateParts(dt){
 }
 function updateTrails(){
   if(!gs)return;
-  gs.players.forEach(p=>{
+  getRenderPlayers().forEach(p=>{
     if(!p||!p.alive)return;
     if(!trails[p.id])trails[p.id]=[];
     trails[p.id].push({x:p.x,y:p.y});
@@ -1067,7 +1144,7 @@ function drawLights(){
   if(!gs)return;
   ctx.save();
   ctx.globalCompositeOperation='lighter';
-  gs.players.forEach(p=>{
+  getRenderPlayers().forEach(p=>{
     if(!p||!p.alive)return;
     const col=COLORS[p.id];
     const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,260);
@@ -1127,7 +1204,7 @@ function drawTrails(){
 
 function drawPlayers(){
   const now=Date.now();
-  gs.players.forEach(p=>{
+  getRenderPlayers().forEach(p=>{
     if(!p||!p.alive)return;
     const col=COLORS[p.id];
     const spd=Math.hypot(p.vx,p.vy);
@@ -1284,7 +1361,7 @@ function renderMinimap(){
   mmc.fillStyle='rgba(4,4,20,.9)'; mmc.fillRect(0,0,W,H);
   splats.forEach(sp=>{mmc.fillStyle=sp.color;mmc.globalAlpha=.32;mmc.beginPath();mmc.arc(sp.x*sx,sp.y*sy,1.4,0,Math.PI*2);mmc.fill();});
   mmc.globalAlpha=1;
-  gs.players.forEach(p=>{
+  getRenderPlayers().forEach(p=>{
     if(!p||!p.alive)return;
     mmc.shadowColor=COLORS[p.id]; mmc.shadowBlur=5; mmc.fillStyle=COLORS[p.id];
     mmc.beginPath(); mmc.arc(p.x*sx,p.y*sy,p.id===myId?4:3,0,Math.PI*2); mmc.fill();
