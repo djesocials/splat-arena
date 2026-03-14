@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-  <link rel="icon" type="image/x-icon" href="favicon.png">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
@@ -212,6 +211,7 @@ const PRAD=26, BRAD=7, BBRAD=16;
 const PSPD=420;
 const GDUR=120, SHOOT_CD=290, PU_INTERVAL=6500;
 const TRAIL_MAX=34;
+const RENDER_DELAY=45;
 const MM_W=120, MM_H=80;
 const DPR_MAX=2;
 
@@ -239,6 +239,7 @@ let playersCache=null;
 let snapshots=[];
 let viewPlayers=null;
 let viewBullets=null;
+let clockSkew=0;
 
 const clientId = Math.random().toString(36).slice(2,10);
 let roomCode='';
@@ -498,7 +499,8 @@ function sampleBullets(targetT){
 
 function updateView(){
   if(isHost){ viewPlayers=null; viewBullets=null; return; }
-  const targetT=Date.now()-70;
+  const nowHost=Date.now()-clockSkew;
+  const targetT=nowHost-RENDER_DELAY;
   viewPlayers=samplePlayers(targetT);
   viewBullets=sampleBullets(targetT);
 }
@@ -536,7 +538,7 @@ function setDiff(d){
 function startBotGame(){
   isHost=true; botMode=true; myId=0; roomCode='';
   remoteInputs={};
-  snapshots=[]; viewPlayers=null;
+  snapshots=[]; viewPlayers=null; viewBullets=null; clockSkew=0;
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='playing'; gs.timeLeft=GDUR; gs.code='------';
   bots=[];
   for(let i=0;i<botCount;i++){
@@ -571,6 +573,10 @@ function bindRoomListeners(){
     if(!data || !data.gs)return;
     const was=gs&&gs.phase==='playing';
     gs=normalizeState(data.gs);
+    if(data.ts){
+      const skew=Date.now()-data.ts;
+      clockSkew=lerp(clockSkew,skew,0.1);
+    }
     storeSnapshot(gs, data.ts||Date.now());
     if(data.splats) splats=Array.isArray(data.splats)?data.splats:Object.values(data.splats);
     if(gs.phase==='lobby'){updateLobby();showScreen('screen-lobby');}
@@ -606,6 +612,7 @@ function cleanupRoom(){
   snapshots=[];
   viewPlayers=null;
   viewBullets=null;
+  clockSkew=0;
 }
 
 function syncPlayersFromDb(playersData){
@@ -671,7 +678,7 @@ async function hostGame(){
   isHost=true; botMode=false; myId=0;
   gs=mkState(); gs.players[0]=mkPlayer(0,myName); gs.phase='lobby'; gs.code=roomCode;
   remoteInputs={};
-  snapshots=[]; viewPlayers=null;
+  snapshots=[]; viewPlayers=null; viewBullets=null; clockSkew=0;
 
   try{
     await set(roomRef,{
@@ -730,7 +737,7 @@ async function joinGame(){
 
   myId=pidFound; isHost=false; botMode=false;
   remoteInputs={};
-  snapshots=[]; viewPlayers=null;
+  snapshots=[]; viewPlayers=null; viewBullets=null; clockSkew=0;
   onDisconnect(ref(db,`rooms/${roomCode}/players/${myId}`)).remove();
   onDisconnect(ref(db,`rooms/${roomCode}/inputs/${myId}`)).remove();
   bindRoomListeners();
@@ -783,7 +790,7 @@ function startGame(){
   gs.code=roomCode||document.getElementById('codeDisplay').textContent;
   splats=[]; parts=[]; trails={}; bId=0; pId=0; puTimer=0; netTimer=0;
   remoteInputs={};
-  snapshots=[]; viewPlayers=null;
+  snapshots=[]; viewPlayers=null; viewBullets=null; clockSkew=0;
   if(metaRef) update(metaRef,{status:'playing',startedAt:serverTimestamp()});
   if(inputsRef) remove(inputsRef);
   bcast(); launchGame();
@@ -871,7 +878,7 @@ function tick(dt){
 
   if(!botMode){
     netTimer += dt;
-    if(netTimer >= 0.05) {
+    if(netTimer >= 0.04) {
        bcast();
        netTimer = 0;
     }
